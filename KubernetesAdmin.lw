@@ -1,0 +1,75 @@
+composition
+
+import Fugue.AWS.Pattern.Network as Network
+import Fugue.AWS.EC2.DhcpOptions as DhcpOptions
+import Fugue.AWS.IAM as IAM
+import Fugue.AWS.EC2 as EC2
+import Fugue.AWS as AWS
+
+region: AWS.Us-west-2
+
+adminDhcpOptions: DhcpOptions.new {
+  domainName: "example.com",
+  domainNameServers: ["AmazonProvidedDNS"],
+  region: region,
+  tags: [AWS.tag("Name", "kubernetes admin")]
+}
+
+adminNetwork: Network.new {
+  name: "kubernetes admin",
+  cidr: "10.241.0.0/16",
+  region: region,
+  publicSubnets: [
+    (AWS.A, "10.241.0.0/24"),
+    (AWS.B, "10.241.1.0/24"),
+  ],
+  privateSubnets: [],
+  enableDnsSupport: True,
+  enableDnsHostnames: True,
+  dhcpOptions: adminDhcpOptions
+}
+
+adminSg: EC2.SecurityGroup.new {
+  description: "Allow SSH traffic from the Internet",
+  ipPermissions: [
+    EC2.IpPermission.ssh(EC2.IpPermission.Target.all),
+  ],
+  vpc: adminNetwork.vpc,
+  tags: [AWS.tag("Name", "kubernetes admin")]
+}
+
+adminPolicy: IAM.Policy.new {
+  policyName: 'adminPolicy',
+  policyDocument: '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "*",
+        "Resource": "*"
+      }
+    ]
+  }'
+}
+
+adminRole: IAM.Role.new {
+  roleName: 'adminRole',
+  assumeRolePolicyDocument: IAM.Policy.AssumeRole.ec2,
+  rolePolicies: [adminPolicy]
+}
+
+adminProfile: IAM.InstanceProfile.new {
+  instanceProfileName: 'adminProfile',
+  roles: [adminRole]
+}
+
+adminInstance: EC2.Instance.new {
+  image: "ami-746aba14",
+  instanceType: EC2.T2_micro,
+  keyName: "kubernetes",
+  securityGroups: [adminSg],
+  iamInstanceProfile: adminProfile,
+  subnet: List.elementAt(0, adminNetwork.publicSubnets),
+  userData: String.readFileUtf8("user-data/admin-user-data.sh"),
+  tags: [AWS.tag('Name', 'kubernetes admin')]
+}

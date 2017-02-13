@@ -1,0 +1,173 @@
+export
+  type KubernetesCluster
+  new
+
+import Fugue.AWS.EC2 as EC2
+import Fugue.AWS.IAM as IAM
+import Fugue.AWS.ELB as ELB
+import Fugue.AWS as AWS
+
+import Ludwig.Template as Template
+import Ludwig.String as String
+
+type KubernetesCluster:
+  elb: ELB.LoadBalancer
+  controllers: List<EC2.Instance>
+  workers: List<EC2.Instance>
+
+fun controllerNode {
+      keyName: String,
+      profile: IAM.InstanceProfile,
+      subnet: EC2.Subnet,
+      sg: EC2.SecurityGroup,
+      node-name: String,
+      node-privateIp: String
+    } -> EC2.Instance:
+  EC2.Instance.new {
+    instanceType: EC2.T2_small,
+    subnet: subnet,
+    image: "ami-746aba14",
+    keyName: keyName,
+    securityGroups: [sg],
+    monitoring: False,
+    privateIpAddress: node-privateIp,
+    userData: Template.render {
+      data: {},
+      template: String.readFileUtf8("user-data/controller-aws-user-data.sh"),
+      missBehavior: Template.MissAsEmptyString
+    },
+    iamInstanceProfile: profile,
+    sourceDestCheck: False,
+    tags: [AWS.tag("Name", node-name)]
+  }
+
+fun workerNode {
+      keyName: String,
+      profile: IAM.InstanceProfile,
+      subnet: EC2.Subnet,
+      sg: EC2.SecurityGroup,
+      node-name: String,
+      node-privateIp: String
+    } -> EC2.Instance:
+  EC2.Instance.new {
+    instanceType: EC2.T2_small,
+    subnet: subnet,
+    image: "ami-746aba14",
+    keyName: keyName,
+    securityGroups: [sg],
+    monitoring: False,
+    privateIpAddress: node-privateIp,
+    userData: Template.render {
+      template: String.readFileUtf8("user-data/worker-aws-user-data.sh"),
+      data: {},
+      missBehavior: Template.MissAsEmptyString
+    },
+    iamInstanceProfile: profile,
+    sourceDestCheck: False,
+    tags: [AWS.tag("Name", node-name)]
+}
+
+# This gives you a name with the given prefix and the last character of the ip
+# address.
+#
+# Example:
+#
+# nameFromIp("worker", "10.0.0.0")  => "worker0"
+fun nameFromIp(prefix: String, ip: String) -> String:
+  let len: String.length(ip)
+  prefix ++ String.drop(len - 1, ip)
+
+fun new {
+      name: String,
+      keyName: String,
+      subnets: List<EC2.Subnet>
+    } -> KubernetesCluster:
+  let policy: IAM.Policy.new {
+    policyName: name ++ "-policy",
+    policyDocument: String.readFileUtf8('policy/kubernetes.json')
+  }
+  let role: IAM.Role.new {
+    roleName: name ++ "-role",
+    rolePolicies: [policy],
+    assumeRolePolicyDocument: '{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "ec2.amazonaws.com"
+           },
+           "Action": "sts:AssumeRole"
+        }
+      ]
+    }',
+  }
+  let profile: IAM.InstanceProfile.new {
+    instanceProfileName: name ++ "-profile",
+    roles: [role],
+  }
+  let vpc: List.elementAt(0, subnets).(EC2.Subnet).vpc
+  let sg: EC2.SecurityGroup.new {
+    description: name ++ "sg",
+    vpc: vpc,
+    ipPermissions: [
+      EC2.IpPermission.ssh(EC2.IpPermission.Target.all),
+      EC2.IpPermission.tcp(6443, EC2.IpPermission.Target.all),
+      EC2.IpPermission.all(EC2.IpPermission.Target.ipRange("10.240.0.0/16")),
+      EC2.IpPermission.all(EC2.IpPermission.Target.securityGroups([sg]))
+    ],
+  }
+  let controllers: [
+    controllerNode {
+      keyName: keyName,
+      profile: profile,
+      subnet: List.elementAt(0, subnets),
+      sg: sg,
+      node-name: nameFromIp("controller", ip),
+      node-privateIp: ip
+    } for ip in [
+      "10.240.0.10",
+      "10.240.0.11",
+      "10.240.0.12"
+    ]
+  ]
+  let elb: ELB.LoadBalancer.new {
+    loadBalancerName: name ++ "-elb",
+    subnets: subnets,
+    securityGroups: [sg],
+    listeners: [
+      ELB.Listener.new {
+        protocol: ELB.TCP,
+        loadBalancerPort: 6443,
+        instanceProtocol: ELB.TCP,
+        instancePort: 6443
+      }
+    ],
+    healthCheck: ELB.HealthCheck.tcp {
+      port: 6443,
+      interval: 5,
+      timeout: 2,
+      unhealthyThreshold: 2,
+      healthyThreshold: 2
+    },
+    instances: controllers
+  }
+  let workers: [
+    workerNode {
+      keyName: keyName,
+      profile: profile,
+      subnet: List.elementAt(0, subnets), 
+      sg: sg,
+      node-name: nameFromIp("worker", ip),
+      node-privateIp: ip,
+    } for ip in [
+      "10.240.0.20",
+      "10.240.0.21",
+      "10.240.0.22"
+    ]
+  ]
+  {
+    elb: elb,
+    controllers: controllers,
+    workers: workers,
+  }

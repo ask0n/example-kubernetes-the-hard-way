@@ -1,0 +1,496 @@
+composition
+
+import Fugue.AWS.EC2 as EC2
+import Fugue.AWS.ELB as ELB
+import Fugue.AWS.IAM as IAM
+import Fugue.AWS as AWS
+
+kubRegion: AWS.Us-west-2
+imageId: "ami-746aba14"
+sshKeypair: "kubernetes"
+
+# VPC_ID=$(aws ec2 create-vpc \
+#   --cidr-block 10.240.0.0/16 | \
+#   jq -r '.Vpc.VpcId')
+
+# aws ec2 create-tags \
+#   --resources ${VPC_ID} \
+#   --tags Key=Name,Value=kubernetes
+
+# aws ec2 modify-vpc-attribute \
+#   --vpc-id ${VPC_ID} \
+#   --enable-dns-support '{"Value": true}'
+
+# aws ec2 modify-vpc-attribute \
+#   --vpc-id ${VPC_ID} \
+#   --enable-dns-hostnames '{"Value": true}'
+
+kubVpc: EC2.Vpc.new {
+  region: kubRegion,
+  cidrBlock: "10.240.0.0/16",
+  dhcpOptions: kubDhcpOptions,
+  enableDnsSupport: True,
+  enableDnsHostnames: True,
+  tags: [AWS.tag("Name", "kubernetes")]
+}
+
+# DHCP_OPTION_SET_ID=$(aws ec2 create-dhcp-options \
+#   --dhcp-configuration "Key=domain-name,Values=us-west-2.compute.internal" \
+#     "Key=domain-name-servers,Values=AmazonProvidedDNS" | \
+#   jq -r '.DhcpOptions.DhcpOptionsId')
+
+# aws ec2 create-tags \
+#   --resources ${DHCP_OPTION_SET_ID} \
+#   --tags Key=Name,Value=kubernetes
+
+# aws ec2 associate-dhcp-options \
+#   --dhcp-options-id ${DHCP_OPTION_SET_ID} \
+#   --vpc-id ${VPC_ID}
+
+kubDhcpOptions: EC2.DhcpOptions.new {
+  region: kubRegion,
+  domainName: "us-west-2.compute.internal",
+  domainNameServers: ["AmazonProvidedDNS"],
+  tags: [AWS.tag("Name", "kubernetes")]
+}
+
+# SUBNET_ID=$(aws ec2 create-subnet \
+#   --vpc-id ${VPC_ID} \
+#   --cidr-block 10.240.0.0/24 | \
+#   jq -r '.Subnet.SubnetId')
+
+# aws ec2 create-tags \
+#   --resources ${SUBNET_ID} \
+#   --tags Key=Name,Value=kubernetes
+
+kubSubnet: EC2.Subnet.new {
+  vpc: kubVpc,
+  cidrBlock: "10.240.0.0/24",
+  mapPublicIpOnLaunch: True,
+  tags: [AWS.tag("Name", "kubernetes")]
+}
+
+# INTERNET_GATEWAY_ID=$(aws ec2 create-internet-gateway | \
+#   jq -r '.InternetGateway.InternetGatewayId')
+
+# aws ec2 create-tags \
+#   --resources ${INTERNET_GATEWAY_ID} \
+#   --tags Key=Name,Value=kubernetes
+
+# aws ec2 attach-internet-gateway \
+#   --internet-gateway-id ${INTERNET_GATEWAY_ID} \
+#   --vpc-id ${VPC_ID}
+
+kubIgw: EC2.InternetGateway.new {
+  vpc: kubVpc,
+  tags: [AWS.tag("Name", "kubernetes")]
+}
+
+# Route Tables
+
+# ROUTE_TABLE_ID=$(aws ec2 create-route-table \
+#   --vpc-id ${VPC_ID} | \
+#   jq -r '.RouteTable.RouteTableId')
+
+# aws ec2 create-tags \
+#   --resources ${ROUTE_TABLE_ID} \
+#   --tags Key=Name,Value=kubernetes
+
+# aws ec2 associate-route-table \
+#   --route-table-id ${ROUTE_TABLE_ID} \
+#   --subnet-id ${SUBNET_ID}
+
+# aws ec2 create-route \
+#   --route-table-id ${ROUTE_TABLE_ID} \
+#   --destination-cidr-block 0.0.0.0/0 \
+#   --gateway-id ${INTERNET_GATEWAY_ID}
+
+# aws ec2 create-route \
+#   --route-table-id ${ROUTE_TABLE_ID} \
+#   --destination-cidr-block 10.200.0.0/24 \
+#   --instance-id ${WORKER_0_INSTANCE_ID}
+
+# aws ec2 create-route \
+#   --route-table-id ${ROUTE_TABLE_ID} \
+#   --destination-cidr-block 10.200.1.0/24 \
+#   --instance-id ${WORKER_1_INSTANCE_ID}
+
+# aws ec2 create-route \
+#   --route-table-id ${ROUTE_TABLE_ID} \
+#   --destination-cidr-block 10.200.2.0/24 \
+#   --instance-id ${WORKER_2_INSTANCE_ID}
+
+kubRouteTable: EC2.RouteTable.new {
+  vpc: kubVpc,
+  routes: [igwKubRoute,kubWorker0Route,kubWorker1Route,kubWorker2Route],
+  associations: [kubSubnet],
+  tags: [AWS.tag("Name", "kubernetes")]
+}
+
+igwKubRoute: EC2.Route.new {
+  destinationCidrBlock: "0.0.0.0/0",
+  target: EC2.GatewayTarget(kubIgw)
+}
+
+kubWorker0Route: EC2.Route.new {
+  destinationCidrBlock: "10.200.0.0/24",
+  target: EC2.InstanceTarget(kubWorkerInstance0)
+}
+
+kubWorker1Route: EC2.Route.new {
+  destinationCidrBlock: "10.200.1.0/24",
+  target: EC2.InstanceTarget(kubWorkerInstance1)
+}
+
+kubWorker2Route: EC2.Route.new {
+  destinationCidrBlock: "10.200.2.0/24",
+  target: EC2.InstanceTarget(kubWorkerInstance2)
+}
+
+# Firewall Rules
+
+# SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+#   --group-name kubernetes \
+#   --description "Kubernetes security group" \
+#   --vpc-id ${VPC_ID} | \
+#   jq -r '.GroupId')
+
+# aws ec2 create-tags \
+#   --resources ${SECURITY_GROUP_ID} \
+#   --tags Key=Name,Value=kubernetes
+
+# aws ec2 authorize-security-group-ingress \
+#   --group-id ${SECURITY_GROUP_ID} \
+#   --protocol all
+
+# aws ec2 authorize-security-group-ingress \
+#   --group-id ${SECURITY_GROUP_ID} \
+#   --protocol all \
+#   --port 0-65535 \
+#   --cidr 10.240.0.0/16
+
+# aws ec2 authorize-security-group-ingress \
+#   --group-id ${SECURITY_GROUP_ID} \
+#   --protocol tcp \
+#   --port 22 \
+#   --cidr 0.0.0.0/0
+
+# aws ec2 authorize-security-group-ingress \
+#   --group-id ${SECURITY_GROUP_ID} \
+#   --protocol tcp \
+#   --port 6443 \
+#   --cidr 0.0.0.0/0
+
+# aws ec2 authorize-security-group-ingress \
+#   --group-id ${SECURITY_GROUP_ID} \
+#   --protocol all \
+#   --source-group ${SECURITY_GROUP_ID}
+
+kubSg: EC2.SecurityGroup.new {
+  description: "Kubernetes security group",
+  vpc: kubVpc,
+  ipPermissions: [
+    EC2.IpPermission.tcp(22, EC2.IpPermission.Target.all),
+    EC2.IpPermission.tcp(6443, EC2.IpPermission.Target.all),
+    EC2.IpPermission.all(EC2.IpPermission.Target.ipRange("10.240.0.0/16")),
+    EC2.IpPermission.all(EC2.IpPermission.Target.securityGroups([kubSg]))
+  ],
+  tags: [AWS.tag("Name", "kubernetes")]
+}
+
+# aws elb create-load-balancer \
+#   --load-balancer-name kubernetes \
+#   --listeners "Protocol=TCP,LoadBalancerPort=6443,InstanceProtocol=TCP,InstancePort=6443" \
+#   --subnets ${SUBNET_ID} \
+#   --security-groups ${SECURITY_GROUP_ID}
+
+# aws elb register-instances-with-load-balancer \
+#   --load-balancer-name kubernetes \
+#   --instances ${CONTROLLER_0_INSTANCE_ID} ${CONTROLLER_1_INSTANCE_ID} ${CONTROLLER_2_INSTANCE_ID}
+
+kubLoadBalancer: ELB.LoadBalancer.new {
+  loadBalancerName: "kubernetes",
+  listeners: [ELB.Listener.new {
+    protocol: ELB.TCP,
+    loadBalancerPort: 6443,
+    instanceProtocol: ELB.TCP,
+    instancePort: 6443
+  }],
+  healthCheck: ELB.HealthCheck.tcp {
+    port: 6443,
+    interval: 5,
+    timeout: 2,
+    unhealthyThreshold: 2,
+    healthyThreshold: 2
+  },
+  subnets: [kubSubnet],
+  securityGroups: [kubSg],
+  instances: [kubControllerInstance0,kubControllerInstance1,kubControllerInstance2]
+}
+
+# cat > kubernetes-iam-role.json <<'EOF'
+# {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#     {"Effect": "Allow", "Principal": { "Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}
+#   ]
+# }
+# EOF
+
+# aws iam create-role \
+#   --role-name kubernetes \
+#   --assume-role-policy-document file://kubernetes-iam-role.json
+
+# cat > kubernetes-iam-policy.json <<'EOF'
+# {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#     {"Effect": "Allow", "Action": ["ec2:*"], "Resource": ["*"]},
+#     {"Effect": "Allow", "Action": ["elasticloadbalancing:*"], "Resource": ["*"]},
+#     {"Effect": "Allow", "Action": ["route53:*"], "Resource": ["*"]},
+#     {"Effect": "Allow", "Action": ["ecr:*"], "Resource": "*"}
+#   ]
+# }
+# EOF
+
+# aws iam put-role-policy \
+#   --role-name kubernetes \
+#   --policy-name kubernetes \
+#   --policy-document file://kubernetes-iam-policy.json
+
+# aws iam create-instance-profile \
+#   --instance-profile-name kubernetes
+
+# aws iam add-role-to-instance-profile \
+#   --instance-profile-name kubernetes \
+#   --role-name kubernetes
+
+kubIamPolicy: IAM.Policy.new {
+  policyName: "kubernetes",
+  policyDocument: '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Action": ["ec2:*"], "Resource": ["*"]},
+      {"Effect": "Allow", "Action": ["elasticloadbalancing:*"], "Resource": ["*"]},
+      {"Effect": "Allow", "Action": ["route53:*"], "Resource": ["*"]},
+      {"Effect": "Allow", "Action": ["ecr:*"], "Resource": "*"},
+      {"Effect": "Allow", "Action": ["kms:Decrypt"], "Resource": "arn:aws:kms:*:*:key/*"},
+      {"Effect": "Allow", "Action": ["dynamodb:GetItem","dynamodb:Query","dynamodb:Scan"], "Resource": "arn:aws:dynamodb:*:*:table/credential-store"}
+    ]
+  }'
+}
+
+kubIamRole: IAM.Role.new {
+  roleName: "kubernetes",
+  assumeRolePolicyDocument: '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Principal": { "Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}
+    ]
+  }',
+  rolePolicies: [kubIamPolicy]
+}
+
+kubInstanceProfile: IAM.InstanceProfile.new {
+  instanceProfileName: "kubernetes",
+  roles: [kubIamRole]
+}
+
+# CONTROLLER_0_INSTANCE_ID=$(aws ec2 run-instances \
+#   --associate-public-ip-address \
+#   --iam-instance-profile 'Name=kubernetes' \
+#   --imageId ${IMAGE_ID} \
+#   --count 1 \
+#   --key-name kubernetes \
+#   --security-group-ids ${SECURITY_GROUP_ID} \
+#   --instance-type t2.small \
+#   --private-ip-address 10.240.0.10 \
+#   --subnet-id ${SUBNET_ID} | \
+#   jq -r '.Instances[].InstanceId')
+
+# aws ec2 modify-instance-attribute \
+#   --instance-id ${CONTROLLER_0_INSTANCE_ID} \
+#   --no-source-dest-check
+
+# aws ec2 create-tags \
+#   --resources ${CONTROLLER_0_INSTANCE_ID} \
+#   --tags Key=Name,Value=controller0
+#
+
+kubControllerInstance0: EC2.Instance.new {
+  keyName: sshKeypair,
+  instanceType: EC2.T2_small,
+  image: imageId,
+  securityGroups: [kubSg],
+  privateIpAddress: "10.240.0.10",
+  subnet: kubSubnet,
+  sourceDestCheck: False,
+  iamInstanceProfile: kubInstanceProfile,
+  userData: String.readFileUtf8("user-data/controller-user-data.sh"),
+  tags: [AWS.tag("Name", "controller0")]
+}
+
+# CONTROLLER_1_INSTANCE_ID=$(aws ec2 run-instances \
+#   --associate-public-ip-address \
+#   --iam-instance-profile 'Name=kubernetes' \
+#   --imageId ${IMAGE_ID} \
+#   --count 1 \
+#   --key-name kubernetes \
+#   --security-group-ids ${SECURITY_GROUP_ID} \
+#   --instance-type t2.small \
+#   --private-ip-address 10.240.0.11 \
+#   --subnet-id ${SUBNET_ID} | \
+#   jq -r '.Instances[].InstanceId')
+
+# aws ec2 modify-instance-attribute \
+#   --instance-id ${CONTROLLER_1_INSTANCE_ID} \
+#   --no-source-dest-check
+
+# aws ec2 create-tags \
+#   --resources ${CONTROLLER_1_INSTANCE_ID} \
+#   --tags Key=Name,Value=controller1
+
+kubControllerInstance1: EC2.Instance.new {
+  keyName: sshKeypair,
+  instanceType: EC2.T2_small,
+  image: imageId,
+  securityGroups: [kubSg],
+  privateIpAddress: "10.240.0.11",
+  subnet: kubSubnet,
+  sourceDestCheck: False,
+  iamInstanceProfile: kubInstanceProfile,
+  userData: String.readFileUtf8("user-data/controller-user-data.sh"),
+  tags: [AWS.tag("Name", "controller1")]
+}
+
+# CONTROLLER_2_INSTANCE_ID=$(aws ec2 run-instances \
+#   --associate-public-ip-address \
+#   --iam-instance-profile 'Name=kubernetes' \
+#   --imageId ${IMAGE_ID} \
+#   --count 1 \
+#   --key-name kubernetes \
+#   --security-group-ids ${SECURITY_GROUP_ID} \
+#   --instance-type t2.small \
+#   --private-ip-address 10.240.0.12 \
+#   --subnet-id ${SUBNET_ID} | \
+#   jq -r '.Instances[].InstanceId')
+
+# aws ec2 modify-instance-attribute \
+#   --instance-id ${CONTROLLER_2_INSTANCE_ID} \
+#   --no-source-dest-check
+
+# aws ec2 create-tags \
+#   --resources ${CONTROLLER_2_INSTANCE_ID} \
+#   --tags Key=Name,Value=controller2
+
+kubControllerInstance2: EC2.Instance.new {
+  keyName: sshKeypair,
+  instanceType: EC2.T2_small,
+  image: imageId,
+  securityGroups: [kubSg],
+  privateIpAddress: "10.240.0.12",
+  subnet: kubSubnet,
+  sourceDestCheck: False,
+  iamInstanceProfile: kubInstanceProfile,
+  userData: String.readFileUtf8("user-data/controller-user-data.sh"),
+  tags: [AWS.tag("Name", "controller2")]
+}
+
+# WORKER_0_INSTANCE_ID=$(aws ec2 run-instances \
+#   --associate-public-ip-address \
+#   --iam-instance-profile 'Name=kubernetes' \
+#   --imageId ${IMAGE_ID} \
+#   --count 1 \
+#   --key-name kubernetes \
+#   --security-group-ids ${SECURITY_GROUP_ID} \
+#   --instance-type t2.small \
+#   --private-ip-address 10.240.0.20 \
+#   --subnet-id ${SUBNET_ID} | \
+#   jq -r '.Instances[].InstanceId')
+
+# aws ec2 modify-instance-attribute \
+#   --instance-id ${WORKER_0_INSTANCE_ID} \
+#   --no-source-dest-check
+
+# aws ec2 create-tags \
+#   --resources ${WORKER_0_INSTANCE_ID} \
+#   --tags Key=Name,Value=worker0
+
+kubWorkerInstance0: EC2.Instance.new {
+  keyName: sshKeypair,
+  instanceType: EC2.T2_small,
+  image: imageId,
+  securityGroups: [kubSg],
+  privateIpAddress: "10.240.0.20",
+  subnet: kubSubnet,
+  sourceDestCheck: False,
+  iamInstanceProfile: kubInstanceProfile,
+  userData: String.readFileUtf8("user-data/worker-user-data.sh"),
+  tags: [AWS.tag("Name", "worker0")]
+}
+
+# WORKER_1_INSTANCE_ID=$(aws ec2 run-instances \
+#   --associate-public-ip-address \
+#   --iam-instance-profile 'Name=kubernetes' \
+#   --imageId ${IMAGE_ID} \
+#   --count 1 \
+#   --key-name kubernetes \
+#   --security-group-ids ${SECURITY_GROUP_ID} \
+#   --instance-type t2.small \
+#   --private-ip-address 10.240.0.21 \
+#   --subnet-id ${SUBNET_ID} | \
+#   jq -r '.Instances[].InstanceId')
+
+# aws ec2 modify-instance-attribute \
+#   --instance-id ${WORKER_1_INSTANCE_ID} \
+#   --no-source-dest-check
+
+# aws ec2 create-tags \
+#   --resources ${WORKER_1_INSTANCE_ID} \
+#   --tags Key=Name,Value=worker1
+
+kubWorkerInstance1: EC2.Instance.new {
+  keyName: sshKeypair,
+  instanceType: EC2.T2_small,
+  image: imageId,
+  securityGroups: [kubSg],
+  privateIpAddress: "10.240.0.21",
+  subnet: kubSubnet,
+  sourceDestCheck: False,
+  iamInstanceProfile: kubInstanceProfile,
+  userData: String.readFileUtf8("user-data/worker-user-data.sh"),
+  tags: [AWS.tag("Name", "worker1")]
+}
+
+# WORKER_2_INSTANCE_ID=$(aws ec2 run-instances \
+#   --associate-public-ip-address \
+#   --iam-instance-profile 'Name=kubernetes' \
+#   --imageId ${IMAGE_ID} \
+#   --count 1 \
+#   --key-name kubernetes \
+#   --security-group-ids ${SECURITY_GROUP_ID} \
+#   --instance-type t2.small \
+#   --private-ip-address 10.240.0.22 \
+#   --subnet-id ${SUBNET_ID} | \
+#   jq -r '.Instances[].InstanceId')
+
+# aws ec2 modify-instance-attribute \
+#   --instance-id ${WORKER_2_INSTANCE_ID} \
+#   --no-source-dest-check
+
+# aws ec2 create-tags \
+#   --resources ${WORKER_2_INSTANCE_ID} \
+#   --tags Key=Name,Value=worker2
+
+kubWorkerInstance2: EC2.Instance.new {
+  keyName: sshKeypair,
+  instanceType: EC2.T2_small,
+  image: imageId,
+  securityGroups: [kubSg],
+  privateIpAddress: "10.240.0.22",
+  subnet: kubSubnet,
+  sourceDestCheck: False,
+  iamInstanceProfile: kubInstanceProfile,
+  userData: String.readFileUtf8("user-data/worker-user-data.sh"),
+  tags: [AWS.tag("Name", "worker2")]
+}

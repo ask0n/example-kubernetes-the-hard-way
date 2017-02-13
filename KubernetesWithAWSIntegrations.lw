@@ -1,0 +1,26 @@
+composition
+
+import Kubernetes.Cluster as Cluster
+
+import Fugue.AWS.Pattern.Network as Network
+import Fugue.AWS as AWS
+
+myNetwork: Network.new {
+  name: "kubernetes",
+  cidr: "10.240.0.0/16",
+  region: AWS.Us-west-2,
+  publicSubnets: [
+    (AWS.A, "10.240.0.0/24"),
+    (AWS.B, "10.240.1.0/24"),
+  ],
+  privateSubnets: [],
+  enableDnsSupport: True,
+  enableDnsHostnames: True,
+  tags: [AWS.tag("KubernetesCluster", "kubernetes")]
+}
+
+myCluster: Cluster.new {
+  name: "kubernetes",
+  subnets: myNetwork.publicSubnets,
+  keyName: "kubernetes"
+}

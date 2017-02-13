@@ -1,0 +1,17 @@
+composition
+
+import Fugue.AWS.Route53 as Route53
+
+zone: Route53.HostedZone.external(
+  Optional.unpackOrError(
+    String.getEnv("ZONEID"),
+    "Missing ZONEID environment variable"))
+
+elbName: Optional.unpackOrError(String.getEnv("ELBNAME"), "Missing ELBNAME environment variable")
+
+record: Route53.ResourceRecordSet.CNAME.new {
+  name: "kubernetes.example.com",
+  value: elbName,
+  ttl: 30,
+  hostedZone: zone,
+}
